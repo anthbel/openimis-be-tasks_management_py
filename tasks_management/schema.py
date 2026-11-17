@@ -22,7 +22,7 @@ from tasks_management.gql_queries import TaskGroupGQLType, TaskExecutorGQLType, 
 from tasks_management.models import TaskGroup, TaskExecutor, Task, TaskFlow, TaskDecision
 from tasks_management.apps import TasksManagementConfig, require
 from tasks_management.data_masking import (
-    TASK_HISTORY_MASKING_MODEL, TASK_MASKING_MODEL, check_entity_string_filter,
+    TASK_HISTORY_MASKING_MODEL, TASK_MASKING_MODEL, check_entity_string_filter, unmasked_task_order_by,
 )
 from tasks_management.validation import pending_tasks
 
@@ -47,6 +47,18 @@ def group_tasks_filter(group_id):
     return on_group | on_member
 
 
+class MaskedTaskConnectionField(OrderedDjangoFilterConnectionField):
+    """Core's ordered connection leaving out, for a user without the masked-data right, the ``orderBy`` terms
+    that order by masked task data (``unmasked_task_order_by``)."""
+
+    @classmethod
+    def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
+        if args.get("orderBy"):
+            args = {**args, "orderBy": unmasked_task_order_by(
+                info.context.user, filterset_class._meta.model, args["orderBy"])}
+        return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
+
+
 class Query(graphene.ObjectType):
     module_name = "tasks_management"
 
@@ -67,7 +79,7 @@ class Query(graphene.ObjectType):
         taskGroupIdString=graphene.String(),
     )
 
-    task = OrderedDjangoFilterConnectionField(
+    task = MaskedTaskConnectionField(
         TaskGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -78,7 +90,7 @@ class Query(graphene.ObjectType):
         entityIds=graphene.List(graphene.UUID),
         entityString__Icontains=graphene.String(),
     )
-    task_history = OrderedDjangoFilterConnectionField(
+    task_history = MaskedTaskConnectionField(
         TaskHistoryGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),

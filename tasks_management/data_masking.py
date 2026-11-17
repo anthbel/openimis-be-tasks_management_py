@@ -1,11 +1,18 @@
+import logging
+
 from django.core.exceptions import PermissionDenied
 from graphene.types.resolver import dict_or_attr_resolver
+from graphene.utils.str_converters import to_snake_case
 
 from core.apps import CoreConfig
 from core.data_masking import MaskingClassStorage
 
+logger = logging.getLogger(__name__)
+
 TASK_MASKING_MODEL = "Task"
 TASK_HISTORY_MASKING_MODEL = "HistoricalTask"
+# The task fields holding copies of other modules' data, which the registered masks mask.
+MASKED_TASK_FIELDS = ("data", "json_ext")
 
 
 def may_see_masked(user):
@@ -63,3 +70,31 @@ def check_entity_string_filter(user, masking_model):
     ``masking_model``: the filter matches the stored entity strings, so its results would tell masked values."""
     if registered_mask(masking_model) is not None and not may_see_masked(user):
         raise PermissionDenied("filtering on entityString needs the right to view masked data")
+
+
+def _order_lookups(term):
+    """The lookups of one ``orderBy`` term, as core's ordered connection applies it."""
+    from core.schema import OrderedDjangoFilterConnectionField
+
+    cleaned = to_snake_case(OrderedDjangoFilterConnectionField._filter_order_by(term) or "")
+    return [part.lstrip("-+") for part in cleaned.split(",") if part]
+
+
+def unmasked_task_order_by(user, model, order_by):
+    """``order_by`` less its terms ordering by the task's ``data`` or ``json_ext``, for a user without the
+    masked-data right while a mask is registered for ``model``: such an ordering would tell the masked values.
+    The primary key orders last, so the order stays total and pages neither repeat nor skip rows."""
+    if not order_by:
+        return order_by
+    terms = [order_by] if isinstance(order_by, str) else list(order_by)
+    kept = terms
+    if registered_mask(model.__name__) is not None and not may_see_masked(user):
+        kept = [term for term in terms if term == "?" or not any(
+            lookup.split("__")[0] in MASKED_TASK_FIELDS for lookup in _order_lookups(term))]
+        if len(kept) < len(terms):
+            logger.info("orderBy %s of %s left out for a user without the masked-data right",
+                        [term for term in terms if term not in kept], model.__name__)
+    primary_key = model._meta.pk.name
+    if primary_key not in [lookup for term in kept if term != "?" for lookup in _order_lookups(term)]:
+        kept = [*kept, primary_key]
+    return kept

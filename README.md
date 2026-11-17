@@ -25,6 +25,9 @@ entity's string in `entityString`). The module masks them with the masks other m
   it like any other field;
 - while a mask is registered, the `entityString_Icontains` filter of `task` and `taskHistory` is refused to a
   reader without the masked-data right.
+- while a mask is registered, the `orderBy` terms of `task` and `taskHistory` ordering by the task's `data` or
+  `json_ext` are left out for a reader without the masked-data right (logged at info); the primary key orders
+  last.
 
 With no mask registered, tasks are returned as stored.
 

@@ -2,6 +2,8 @@
 masked-data right, on every path reaching them; the entity string filter is refused to those readers."""
 import json
 
+from graphene import relay
+
 from core.data_masking import DataMaskAbs, MaskingClassRegistryPoint
 from core.models.openimis_graphql_test_case import openIMISGraphQLTestCase, BaseTestContext
 from core.test_helpers import create_test_interactive_user, create_test_role
@@ -9,6 +11,10 @@ from tasks_management.apps import TasksManagementConfig
 from tasks_management.models import Task, TaskExecutor, TaskGroup
 
 MASK = DataMaskAbs().anonymize("")
+
+
+def relay_id(type_name, pk):
+    return relay.Node.to_global_id(type_name, str(pk))
 SOURCE = "mask_task_source"
 
 
@@ -142,3 +148,41 @@ class TaskMaskingGQLTestCase(openIMISGraphQLTestCase):
     def test_entity_string_filter_is_applied_with_the_masked_data_right(self):
         arguments = f'source: "{SOURCE}", entityString_Icontains: "{str(self.entity)}"'
         self.assertEqual(len(self._nodes(self.unmasked_token, "task", "id", arguments)), 1)
+
+    def _ordered_names(self, token, field, order):
+        nodes = self._nodes(token, field, "data", f'source: "mask_order_source", orderBy: ["{order}"]')
+        return [json.loads(node["data"])["incoming_data"]["first_name"] for node in nodes]
+
+    def test_an_ordering_on_masked_task_data_is_left_out_without_the_masked_data_right(self):
+        tasks = []
+        for _ in range(2):
+            task = Task(
+                source="mask_order_source", status=Task.Status.ACCEPTED, business_event="mask_task_event",
+                executor_action_event=TasksManagementConfig.default_executor_event, business_status={},
+                task_group=self.group, data={"incoming_data": {"first_name": ""}}, json_ext={"secret": ""})
+            task.save(username=self.reader.username)
+            tasks.append(task)
+        by_id = sorted(tasks, key=lambda task: str(task.id))
+        for task, name in zip(by_id, ("Zelda", "Abel")):
+            task.data = {"incoming_data": {"first_name": name}}
+            task.json_ext = {"secret": name}
+            task.save(username=self.reader.username)
+        for field in ("task", "taskHistory"):
+            for order in ("data__incoming_data__first_name", "json_ext__secret"):
+                with self.subTest(field=field, order=order):
+                    self.assertEqual(self._ordered_names(self.unmasked_token, field, order)[-1], "Zelda")
+        for order in ("data__incoming_data__first_name", "json_ext__secret"):
+            with self.subTest(order=order):
+                self.assertEqual(self._ordered_names(self.reader_token, "task", order), [MASK, MASK])
+                nodes = self._nodes(self.reader_token, "task", "id",
+                                    f'source: "mask_order_source", orderBy: ["{order}"]')
+                self.assertEqual([node["id"] for node in nodes],
+                                 [self._global_id(task) for task in by_id])
+                rows = Task.history.filter(id__in=[task.id for task in by_id]).order_by("history_id")
+                nodes = self._nodes(self.reader_token, "taskHistory", "id",
+                                    f'source: "mask_order_source", orderBy: ["{order}"]')
+                self.assertEqual([node["id"] for node in nodes],
+                                 [relay_id("TaskHistoryGQLType", row.history_id) for row in rows])
+
+    def _global_id(self, task):
+        return relay_id("TaskGQLType", task.id)
