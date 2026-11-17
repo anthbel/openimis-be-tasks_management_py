@@ -167,3 +167,13 @@ def bind_service_signals():
         bind_type=ServiceSignalBindType.AFTER
     )
 ```
+
+When the task is completed, the handler runs the approved operation of the service in a savepoint:
+- an update task is refused when the entity no longer holds the values the task recorded in `current_data` when it
+  was created (another write changed it since), so the approval does not overwrite that write. The comparison runs
+  when the service saves the entity (a `pre_save` receiver, `check_approved_update`): it locks the entity's row,
+  after any lock the service took first, and reads it, so a write committed while the approval waited is seen;
+- a refusal by the service, an error result (`{'success': False, ...}`) or an exception, rolls back what the
+  operation wrote.
+
+A refused task ends `FAILED` instead of `COMPLETED`, with the reason under `completion_error` of its `json_ext`.
