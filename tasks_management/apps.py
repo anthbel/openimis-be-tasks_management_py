@@ -130,10 +130,14 @@ class TasksManagementConfig(AppConfig):
     flow_batch_sources = None
 
     def ready(self):
+        from django.db.models.signals import pre_save
+
         from core.models import ModuleConfiguration
+        from tasks_management.services import check_approved_update
 
         cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG)
         self.__load_config(cfg)
+        pre_save.connect(check_approved_update, dispatch_uid="tasks_management_check_approved_update")
 
     @classmethod
     def __load_config(cls, cfg):

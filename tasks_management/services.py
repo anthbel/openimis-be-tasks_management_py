@@ -4,6 +4,7 @@ import decimal
 import logging
 import uuid
 from abc import abstractmethod, ABC
+from contextvars import ContextVar
 from typing import Dict, Type
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
@@ -810,15 +811,14 @@ def on_task_complete_service_handler(service_type):
 
     def refusal_of(operation, user, task_data):
         """Runs the approved ``operation`` in a savepoint; the reason it was refused, or None once it is written.
-        An update whose entity no longer holds the values the task was created on is refused, so it does not
-        overwrite what was written since."""
+        An update whose entity no longer holds the values the task was created on is refused when the service
+        saves it (``check_approved_update``), so it does not overwrite what was written since."""
+        token = None
+        if operation == 'update':
+            token = _approved_update.set((service_type.OBJECT_TYPE, str(task_data['incoming_data'].get('id')),
+                                          task_data.get('current_data') or {}))
         try:
             with transaction.atomic():
-                if operation == 'update':
-                    changed = _changed_since_task(service_type.OBJECT_TYPE, task_data)
-                    if changed:
-                        return (f"{service_type.OBJECT_TYPE.__name__} changed since the task was created: "
-                                f"{', '.join(changed)}")
                 outcome = getattr(service_type(user), operation)(task_data['incoming_data'])
                 if isinstance(outcome, dict) and not outcome.get('success', True):
                     transaction.set_rollback(True)
@@ -828,6 +828,9 @@ def on_task_complete_service_handler(service_type):
         except Exception as exc:
             logger.error("Error while executing the approved task operation", exc_info=exc)
             return str(exc) or exc.__class__.__name__
+        finally:
+            if token is not None:
+                _approved_update.reset(token)
         return None
 
     def func(**kwargs):
@@ -878,14 +881,26 @@ def _entity_value(entity, key):
     return to_json_safe_value(value) if value else value
 
 
-def _changed_since_task(model, task_data):
-    """The fields of an update task's current_data whose value in the entity is no longer the one the task was
-    created on; empty when the entity is gone (the service then refuses the update)."""
-    current = task_data.get('current_data') or {}
-    entity = model.objects.filter(id=(task_data.get('incoming_data') or {}).get('id')).first()
-    if entity is None:
-        return []
-    return [key for key, value in current.items() if _entity_value(entity, key) != value]
+# The update task an approval is writing: (model, entity id, the task's current_data).
+_approved_update = ContextVar('tasks_management_approved_update', default=None)
+
+
+def check_approved_update(sender=None, instance=None, **kwargs):
+    """pre_save receiver of every model. When ``instance`` is the entity of the update task being approved, locks
+    its row, reads it and raises ValidationError when a field of the task's current_data no longer holds the value
+    the task was created on; the service returns it as its error result. The row lock comes after the locks the
+    service took before saving (a benefit plan's, for an enrolment) and lasts to the commit."""
+    approved = _approved_update.get()
+    if approved is None or sender is not approved[0] or str(instance.pk) != approved[1]:
+        return
+    _approved_update.set(None)
+    rows = sender._base_manager.filter(pk=instance.pk)
+    if transaction.get_connection().in_atomic_block:
+        rows = rows.select_for_update()
+    row = rows.first()
+    changed = [key for key, value in approved[2].items() if _entity_value(row, key) != value] if row else []
+    if changed:
+        raise ValidationError(f"{sender.__name__} changed since the task was created: {', '.join(changed)}")
 
 
 def _get_std_crud_task_data_payload(entity, payload):
