@@ -212,7 +212,12 @@ class TaskService(BaseService):
     def resolve_task(self, obj_data):
         try:
             self.validation_class.validate_update(self.user, **obj_data)
-            obj = self.OBJECT_TYPE.objects.get(id=obj_data['id'])
+            # The row is locked and read under the lock: a task another transaction closed (failed by a
+            # business rule, completed) is refused instead of being saved back from a stale read.
+            obj = self.OBJECT_TYPE.objects.select_for_update(of=('self',)).get(id=obj_data['id'])
+            if obj.status not in (Task.Status.RECEIVED, Task.Status.ACCEPTED):
+                raise ValidationError(
+                    "tasks_management: task '%s' is %s and can no longer be resolved" % (obj.id, obj.status))
             incoming_status = obj_data.get('business_status')
             additional_data = obj_data.get('additional_data')
             self._update_task_business_status(obj, incoming_status, additional_data)
