@@ -13,6 +13,26 @@ It is dedicated to be deployed as a module of [openimis-be_py](https://github.co
 ## GraphQl Queries
 * task, taskGroup, taskExecutor, taskFlow, taskDecision, taskAssignmentTargets
 
+## Data masking
+Tasks hold copies of the data of the entities they act on (`data`, `json_ext`, `businessData`, and the
+entity's string in `entityString`). The module masks them with the masks other modules register through
+`core.data_masking.MaskingClassRegistryPoint` for the models `Task` and `HistoricalTask`:
+- for a reader without the masked-data right (`core` 900101), a task and a task history row are masked on
+  every path reaching them (`task`, `taskHistory`, `TaskGroup.taskSet`, `TaskDecision.task`, `TaskFlow.tasks`,
+  any other nested path), once per object, before any field is read; `businessData` is serialized from the
+  masked `data`;
+- the mask receives the task with its `entity_string` attribute set to the entity's string, so it may mask
+  it like any other field;
+- while a mask is registered, the `entityString_Icontains` filter of `task` and `taskHistory` is refused to a
+  reader without the masked-data right.
+- while a Task or HistoricalTask mask is registered, the `orderBy` terms of every ordered connection of the
+  module (`task`, `taskHistory`, `taskGroup`, `taskExecutor`, `taskFlow`, `taskDecision`) whose path traverses a
+  JSON field (the task's `data` or `json_ext`, a task reached through a relation, or another model's JSON field
+  such as a duplicate candidate's evidence) or names no field are left out for a reader without the masked-data
+  right (logged at info); the primary key orders last.
+
+With no mask registered, tasks are returned as stored.
+
 ## Services
 - Task
   - create

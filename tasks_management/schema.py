@@ -21,6 +21,9 @@ from tasks_management.gql_queries import TaskGroupGQLType, TaskExecutorGQLType, 
     TaskFlowGQLType, TaskDecisionGQLType, TaskAssignmentTargetGQLType
 from tasks_management.models import TaskGroup, TaskExecutor, Task, TaskFlow, TaskDecision
 from tasks_management.apps import TasksManagementConfig, require
+from tasks_management.data_masking import (
+    TASK_HISTORY_MASKING_MODEL, TASK_MASKING_MODEL, check_entity_string_filter, unmasked_task_order_by,
+)
 from tasks_management.validation import pending_tasks
 
 
@@ -44,10 +47,23 @@ def group_tasks_filter(group_id):
     return on_group | on_member
 
 
+class MaskedOrderedConnectionField(OrderedDjangoFilterConnectionField):
+    """Core's ordered connection leaving out, for a user without the masked-data right, the ``orderBy`` terms
+    whose path traverses a JSON field (``unmasked_task_order_by``). Every ordered connection of the module
+    uses it."""
+
+    @classmethod
+    def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
+        if args.get("orderBy"):
+            args = {**args, "orderBy": unmasked_task_order_by(
+                info.context.user, filterset_class._meta.model, args["orderBy"])}
+        return super().resolve_queryset(connection, iterable, info, args, filtering_args, filterset_class)
+
+
 class Query(graphene.ObjectType):
     module_name = "tasks_management"
 
-    task_group = OrderedDjangoFilterConnectionField(
+    task_group = MaskedOrderedConnectionField(
         TaskGroupGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),
@@ -55,7 +71,7 @@ class Query(graphene.ObjectType):
         client_mutation_id=graphene.String(),
         search=graphene.String(),
     )
-    task_executor = OrderedDjangoFilterConnectionField(
+    task_executor = MaskedOrderedConnectionField(
         TaskExecutorGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),
@@ -64,7 +80,7 @@ class Query(graphene.ObjectType):
         taskGroupIdString=graphene.String(),
     )
 
-    task = OrderedDjangoFilterConnectionField(
+    task = MaskedOrderedConnectionField(
         TaskGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -75,7 +91,7 @@ class Query(graphene.ObjectType):
         entityIds=graphene.List(graphene.UUID),
         entityString__Icontains=graphene.String(),
     )
-    task_history = OrderedDjangoFilterConnectionField(
+    task_history = MaskedOrderedConnectionField(
         TaskHistoryGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -86,14 +102,14 @@ class Query(graphene.ObjectType):
         entityIds=graphene.List(graphene.UUID),
         entityString__Icontains=graphene.String(),
     )
-    task_flow = OrderedDjangoFilterConnectionField(
+    task_flow = MaskedOrderedConnectionField(
         TaskFlowGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         client_mutation_id=graphene.String(),
         search=graphene.String(),
         showSuperseded=graphene.Boolean(),
     )
-    task_decision = OrderedDjangoFilterConnectionField(
+    task_decision = MaskedOrderedConnectionField(
         TaskDecisionGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         taskId=graphene.UUID(),
@@ -128,6 +144,7 @@ class Query(graphene.ObjectType):
 
         entity_string = kwargs.get("entityString__Icontains")
         if entity_string:
+            check_entity_string_filter(user, TASK_MASKING_MODEL)
             task_ids = [task.id for task in query if entity_string.lower() in str(task.entity).lower()]
             query = query.filter(id__in=task_ids)
 
@@ -162,6 +179,7 @@ class Query(graphene.ObjectType):
 
         entity_string = kwargs.get("entityString__Icontains")
         if entity_string:
+            check_entity_string_filter(user, TASK_HISTORY_MASKING_MODEL)
             task_ids = [task.id for task in query if entity_string.lower() in str(task.entity).lower()]
             query = query.filter(id__in=task_ids)
 
