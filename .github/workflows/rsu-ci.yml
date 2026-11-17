@@ -31,7 +31,7 @@ jobs:
     env:
       ASSEMBLY_REF: release/26.10
       MODULE_NAME: tasks_management
-      BASE_MODULES: core individual workflow location medical medical_pricelist calculation contribution_plan opensearch_reports
+      BASE_MODULES: core individual workflow location medical medical_pricelist calculation contribution_plan social_protection payment_cycle invoice calcrule_social_protection payroll opensearch_reports
       INDIVIDUAL_REF: rsu/26.10
       EXTRA_MODULES: ""
     steps:
