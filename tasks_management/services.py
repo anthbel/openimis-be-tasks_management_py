@@ -808,10 +808,27 @@ def on_task_complete_service_handler(service_type):
     if issubclass(service_type, DeleteCheckerLogicServiceMixin):
         operations.append('delete')
 
-    def service_operation_handler(operation, user, data):
-        # Run the operation form a service by name
-        # getattr(ExampleService(user), 'update')(data)
-        return getattr(service_type(user), operation)(data)
+    def refusal_of(operation, user, task_data):
+        """Runs the approved ``operation`` in a savepoint; the reason it was refused, or None once it is written.
+        An update whose entity no longer holds the values the task was created on is refused, so it does not
+        overwrite what was written since."""
+        try:
+            with transaction.atomic():
+                if operation == 'update':
+                    changed = _changed_since_task(service_type.OBJECT_TYPE, task_data)
+                    if changed:
+                        return (f"{service_type.OBJECT_TYPE.__name__} changed since the task was created: "
+                                f"{', '.join(changed)}")
+                outcome = getattr(service_type(user), operation)(task_data['incoming_data'])
+                if isinstance(outcome, dict) and not outcome.get('success', True):
+                    transaction.set_rollback(True)
+                    return _error_text(outcome)
+        except ValidationError as exc:
+            return "; ".join(exc.messages)
+        except Exception as exc:
+            logger.error("Error while executing the approved task operation", exc_info=exc)
+            return str(exc) or exc.__class__.__name__
+        return None
 
     def func(**kwargs):
         try:
@@ -828,13 +845,47 @@ def on_task_complete_service_handler(service_type):
                 operation = business_event.split(".")[1]
                 if operation in operations:
                     user = User.objects.get(id=result['data']['user']['id'])
-                    data = task['data']['incoming_data']
-                    service_operation_handler(operation, user, data)
+                    refusal = refusal_of(operation, user, task['data'])
+                    if refusal:
+                        _fail_completed_task(task['id'], user, refusal)
+                        return [refusal]
         except Exception as e:
             logger.error("Error while executing on_task_complete", exc_info=e)
             return [str(e)]
 
     return func
+
+
+# Key of Task.json_ext that holds why an approved task's operation was refused.
+COMPLETION_ERROR_KEY = 'completion_error'
+
+
+def _error_text(outcome):
+    return ": ".join(str(part) for part in (outcome.get('message'), outcome.get('detail')) if part) or str(outcome)
+
+
+def _fail_completed_task(task_id, user, reason):
+    """Sets the task FAILED with ``reason`` under COMPLETION_ERROR_KEY of its json_ext."""
+    task = Task.objects.get(id=task_id)
+    task.status = Task.Status.FAILED
+    task.json_ext = {**(task.json_ext or {}), COMPLETION_ERROR_KEY: reason}
+    task.save(user=user)
+
+
+def _entity_value(entity, key):
+    """The value of ``key`` on ``entity`` as an update task's current_data holds it."""
+    value = getattr(entity, key)
+    return to_json_safe_value(value) if value else value
+
+
+def _changed_since_task(model, task_data):
+    """The fields of an update task's current_data whose value in the entity is no longer the one the task was
+    created on; empty when the entity is gone (the service then refuses the update)."""
+    current = task_data.get('current_data') or {}
+    entity = model.objects.filter(id=(task_data.get('incoming_data') or {}).get('id')).first()
+    if entity is None:
+        return []
+    return [key for key, value in current.items() if _entity_value(entity, key) != value]
 
 
 def _get_std_crud_task_data_payload(entity, payload):
@@ -846,8 +897,7 @@ def _get_std_crud_task_data_payload(entity, payload):
         incoming_data[key] = incoming_value
 
         if entity:
-            entity_value = getattr(entity, key)
-            current_data[key] = to_json_safe_value(entity_value) if entity_value else entity_value
+            current_data[key] = _entity_value(entity, key)
 
     return {"incoming_data": incoming_data, "current_data": current_data}
 
