@@ -1,6 +1,7 @@
 import logging
 
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import FieldDoesNotExist, PermissionDenied
+from django.db.models import JSONField
 from graphene.types.resolver import dict_or_attr_resolver
 from graphene.utils.str_converters import to_snake_case
 
@@ -11,8 +12,6 @@ logger = logging.getLogger(__name__)
 
 TASK_MASKING_MODEL = "Task"
 TASK_HISTORY_MASKING_MODEL = "HistoricalTask"
-# The task fields holding copies of other modules' data, which the registered masks mask.
-MASKED_TASK_FIELDS = ("data", "json_ext")
 
 
 def may_see_masked(user):
@@ -80,17 +79,36 @@ def _order_lookups(term):
     return [part.lstrip("-+") for part in cleaned.split(",") if part]
 
 
-def unmasked_task_order_by(user, model, order_by):
-    """``order_by`` less its terms ordering by the task's ``data`` or ``json_ext``, for a user without the
-    masked-data right while a mask is registered for ``model``: such an ordering would tell the masked values.
-    The primary key orders last, so the order stays total and pages neither repeat nor skip rows."""
+def traverses_json_field(model, lookup):
+    """Whether the ``__`` lookup ``lookup`` from ``model`` reads a JSON field of any model along the relations it
+    follows, or names something that is not a field of them (an annotation, a generic relation)."""
+    for part in lookup.split("__"):
+        if model is None:
+            return True
+        try:
+            field = model._meta.get_field(part)
+        except FieldDoesNotExist:
+            return True
+        if isinstance(field, JSONField):
+            return True
+        if not field.is_relation:
+            return False
+        model = field.related_model
+    return False
+
+
+def unmasked_json_order_by(user, model, order_by, applies=True):
+    """``order_by`` less, for a user without the masked-data right and while ``applies``, its terms whose path
+    traverses a JSON field (``traverses_json_field``): JSON fields hold the copies of masked values, so such an
+    ordering would tell them. The primary key orders last, so the order stays total and pages neither repeat
+    nor skip rows."""
     if not order_by:
         return order_by
     terms = [order_by] if isinstance(order_by, str) else list(order_by)
     kept = terms
-    if registered_mask(model.__name__) is not None and not may_see_masked(user):
+    if applies and not may_see_masked(user):
         kept = [term for term in terms if term == "?" or not any(
-            lookup.split("__")[0] in MASKED_TASK_FIELDS for lookup in _order_lookups(term))]
+            traverses_json_field(model, lookup) for lookup in _order_lookups(term))]
         if len(kept) < len(terms):
             logger.info("orderBy %s of %s left out for a user without the masked-data right",
                         [term for term in terms if term not in kept], model.__name__)
@@ -98,3 +116,8 @@ def unmasked_task_order_by(user, model, order_by):
     if primary_key not in [lookup for term in kept if term != "?" for lookup in _order_lookups(term)]:
         kept = [*kept, primary_key]
     return kept
+
+
+def unmasked_task_order_by(user, model, order_by):
+    """``unmasked_json_order_by`` while a mask is registered for ``model`` (Task or HistoricalTask)."""
+    return unmasked_json_order_by(user, model, order_by, applies=registered_mask(model.__name__) is not None)

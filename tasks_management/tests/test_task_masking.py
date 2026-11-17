@@ -186,3 +186,26 @@ class TaskMaskingGQLTestCase(openIMISGraphQLTestCase):
 
     def _global_id(self, task):
         return relay_id("TaskGQLType", task.id)
+
+    def test_an_ordering_through_a_relation_to_a_json_field_is_left_out_without_the_masked_data_right(self):
+        from tasks_management.models import TaskDecision
+
+        tasks = []
+        for _ in range(2):
+            task = Task(
+                source="mask_relation_source", status=Task.Status.ACCEPTED, business_event="mask_task_event",
+                executor_action_event=TasksManagementConfig.default_executor_event, business_status={},
+                task_group=self.group, data={}, json_ext={})
+            task.save(username=self.reader.username)
+            tasks.append(task)
+        by_id = sorted(tasks, key=lambda task: str(task.id))
+        for task, note in zip(by_id, ("Zelda", "Abel")):
+            TaskDecision(task=task, user=self.reader, decision=TaskDecision.Decision.choices[0][0],
+                         json_ext={"note": note}).save(username=self.reader.username)
+        for order in ("decisions__json_ext__note", "decisions_JsonExt_Note"):
+            with self.subTest(order=order):
+                arguments = f'source: "mask_relation_source", orderBy: ["{order}"]'
+                self.assertEqual([node["id"] for node in self._nodes(self.reader_token, "task", "id", arguments)],
+                                 [self._global_id(task) for task in by_id])
+                self.assertEqual([node["id"] for node in self._nodes(self.unmasked_token, "task", "id", arguments)],
+                                 [self._global_id(task) for task in reversed(by_id)])
