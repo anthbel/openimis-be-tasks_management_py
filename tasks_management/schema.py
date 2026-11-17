@@ -21,6 +21,9 @@ from tasks_management.gql_queries import TaskGroupGQLType, TaskExecutorGQLType, 
     TaskFlowGQLType, TaskDecisionGQLType, TaskAssignmentTargetGQLType
 from tasks_management.models import TaskGroup, TaskExecutor, Task, TaskFlow, TaskDecision
 from tasks_management.apps import TasksManagementConfig, require
+from tasks_management.data_masking import (
+    TASK_HISTORY_MASKING_MODEL, TASK_MASKING_MODEL, check_entity_string_filter,
+)
 from tasks_management.validation import pending_tasks
 
 
@@ -128,6 +131,7 @@ class Query(graphene.ObjectType):
 
         entity_string = kwargs.get("entityString__Icontains")
         if entity_string:
+            check_entity_string_filter(user, TASK_MASKING_MODEL)
             task_ids = [task.id for task in query if entity_string.lower() in str(task.entity).lower()]
             query = query.filter(id__in=task_ids)
 
@@ -162,6 +166,7 @@ class Query(graphene.ObjectType):
 
         entity_string = kwargs.get("entityString__Icontains")
         if entity_string:
+            check_entity_string_filter(user, TASK_HISTORY_MASKING_MODEL)
             task_ids = [task.id for task in query if entity_string.lower() in str(task.entity).lower()]
             query = query.filter(id__in=task_ids)
 

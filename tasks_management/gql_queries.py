@@ -9,10 +9,22 @@ from graphene_django import DjangoObjectType
 from core import ExtendedConnection, prefix_filterset
 from core.gql_queries import UserGQLType
 from tasks_management.apps import TasksManagementConfig
+from tasks_management.data_masking import (
+    TASK_HISTORY_MASKING_MODEL, TASK_MASKING_MODEL, mask_task, masked_entity_string, masking_resolver,
+)
 from tasks_management.models import TaskGroup, TaskExecutor, Task, TaskFlow, TaskFlowStep, TaskDecision
 from core.gql import ScopedQuerysetMixin
 
 DICT_STRING = "{}"
+
+
+def _task_entity_string(task):
+    return task.entity.__str__()
+
+
+def _history_entity_string(history):
+    # Historical rows don't carry the GenericForeignKey; rebuild the Task to resolve it.
+    return history.instance.entity.__str__() if history.entity_id else None
 
 
 def is_task_triage(user):
@@ -31,6 +43,7 @@ class TaskGQLType(ScopedQuerysetMixin, DjangoObjectType):
     class Meta:
         model = Task
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver(TASK_MASKING_MODEL, _task_entity_string)
         filter_fields = {
             "id": ["exact"],
             "entity_type": ["exact"],
@@ -55,6 +68,7 @@ class TaskGQLType(ScopedQuerysetMixin, DjangoObjectType):
         return self.decisions.filter(is_deleted=False).count()
 
     def resolve_business_data(self, info):
+        mask_task(info, self, TASK_MASKING_MODEL, _task_entity_string)
         data = self.data
         serializer_path = self.business_data_serializer
         serialized_data = copy.deepcopy(data)
@@ -83,7 +97,7 @@ class TaskGQLType(ScopedQuerysetMixin, DjangoObjectType):
         return serialized_data
 
     def resolve_entity_string(self, info):
-        return self.entity.__str__()
+        return masked_entity_string(info, self, TASK_MASKING_MODEL, _task_entity_string)
 
 
 class TaskHistoryGQLType(DjangoObjectType):
@@ -94,6 +108,7 @@ class TaskHistoryGQLType(DjangoObjectType):
     class Meta:
         model = Task.history.model
         interfaces = (graphene.relay.Node,)
+        default_resolver = masking_resolver(TASK_HISTORY_MASKING_MODEL, _history_entity_string)
         filter_fields = {
             "id": ["exact"],
             "entity_type": ["exact"],
@@ -112,6 +127,7 @@ class TaskHistoryGQLType(DjangoObjectType):
         connection_class = ExtendedConnection
 
     def resolve_business_data(self, info):
+        mask_task(info, self, TASK_HISTORY_MASKING_MODEL, _history_entity_string)
         data = self.data
         serializer_path = self.business_data_serializer
         serialized_data = copy.deepcopy(data)
@@ -140,8 +156,7 @@ class TaskHistoryGQLType(DjangoObjectType):
         return serialized_data
 
     def resolve_entity_string(self, info):
-        # Historical rows don't carry the GenericForeignKey; rebuild the Task to resolve it.
-        return self.instance.entity.__str__() if self.entity_id else None
+        return masked_entity_string(info, self, TASK_HISTORY_MASKING_MODEL, _history_entity_string)
 
     @classmethod
     def get_queryset(cls, queryset, info):
