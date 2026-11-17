@@ -47,9 +47,10 @@ def group_tasks_filter(group_id):
     return on_group | on_member
 
 
-class MaskedTaskConnectionField(OrderedDjangoFilterConnectionField):
+class MaskedOrderedConnectionField(OrderedDjangoFilterConnectionField):
     """Core's ordered connection leaving out, for a user without the masked-data right, the ``orderBy`` terms
-    that order by masked task data (``unmasked_task_order_by``)."""
+    whose path traverses a JSON field (``unmasked_task_order_by``). Every ordered connection of the module
+    uses it."""
 
     @classmethod
     def resolve_queryset(cls, connection, iterable, info, args, filtering_args, filterset_class):
@@ -62,7 +63,7 @@ class MaskedTaskConnectionField(OrderedDjangoFilterConnectionField):
 class Query(graphene.ObjectType):
     module_name = "tasks_management"
 
-    task_group = OrderedDjangoFilterConnectionField(
+    task_group = MaskedOrderedConnectionField(
         TaskGroupGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),
@@ -70,7 +71,7 @@ class Query(graphene.ObjectType):
         client_mutation_id=graphene.String(),
         search=graphene.String(),
     )
-    task_executor = OrderedDjangoFilterConnectionField(
+    task_executor = MaskedOrderedConnectionField(
         TaskExecutorGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         dateValidFrom__Gte=graphene.DateTime(),
@@ -79,7 +80,7 @@ class Query(graphene.ObjectType):
         taskGroupIdString=graphene.String(),
     )
 
-    task = MaskedTaskConnectionField(
+    task = MaskedOrderedConnectionField(
         TaskGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -90,7 +91,7 @@ class Query(graphene.ObjectType):
         entityIds=graphene.List(graphene.UUID),
         entityString__Icontains=graphene.String(),
     )
-    task_history = MaskedTaskConnectionField(
+    task_history = MaskedOrderedConnectionField(
         TaskHistoryGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         applyDefaultValidityFilter=graphene.Boolean(),
@@ -101,14 +102,14 @@ class Query(graphene.ObjectType):
         entityIds=graphene.List(graphene.UUID),
         entityString__Icontains=graphene.String(),
     )
-    task_flow = OrderedDjangoFilterConnectionField(
+    task_flow = MaskedOrderedConnectionField(
         TaskFlowGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         client_mutation_id=graphene.String(),
         search=graphene.String(),
         showSuperseded=graphene.Boolean(),
     )
-    task_decision = OrderedDjangoFilterConnectionField(
+    task_decision = MaskedOrderedConnectionField(
         TaskDecisionGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         taskId=graphene.UUID(),

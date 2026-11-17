@@ -119,5 +119,7 @@ def unmasked_json_order_by(user, model, order_by, applies=True):
 
 
 def unmasked_task_order_by(user, model, order_by):
-    """``unmasked_json_order_by`` while a mask is registered for ``model`` (Task or HistoricalTask)."""
-    return unmasked_json_order_by(user, model, order_by, applies=registered_mask(model.__name__) is not None)
+    """``unmasked_json_order_by`` on any of this module's models while a Task or HistoricalTask mask is
+    registered: every model of the module reaches the tasks' data through its relations."""
+    masked = any(registered_mask(name) is not None for name in (TASK_MASKING_MODEL, TASK_HISTORY_MASKING_MODEL))
+    return unmasked_json_order_by(user, model, order_by, applies=masked)

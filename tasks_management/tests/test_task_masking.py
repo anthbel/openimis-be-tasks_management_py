@@ -8,7 +8,7 @@ from core.data_masking import DataMaskAbs, MaskingClassRegistryPoint
 from core.models.openimis_graphql_test_case import openIMISGraphQLTestCase, BaseTestContext
 from core.test_helpers import create_test_interactive_user, create_test_role
 from tasks_management.apps import TasksManagementConfig
-from tasks_management.models import Task, TaskExecutor, TaskGroup
+from tasks_management.models import Task, TaskDecision, TaskExecutor, TaskFlow, TaskGroup
 
 MASK = DataMaskAbs().anonymize("")
 
@@ -44,9 +44,10 @@ class TaskMaskingGQLTestCase(openIMISGraphQLTestCase):
         super().setUpClass()
         admin = create_test_interactive_user(username="mask_task_admin")
         reader_role = create_test_role(
-            perm_names=["gql_task_search_perms", "gql_task_group_search_perms"], name="MaskTaskReaderRole")
+            perm_names=["gql_task_search_perms", "gql_task_group_search_perms", "gql_task_flow_search_perms"],
+            name="MaskTaskReaderRole")
         unmasked_role = create_test_role(
-            perm_names=["gql_task_search_perms", "gql_task_group_search_perms",
+            perm_names=["gql_task_search_perms", "gql_task_group_search_perms", "gql_task_flow_search_perms",
                         "gql_query_enable_viewing_masked_data_perms"],
             name="MaskTaskUnmaskedRole")
         cls.reader = create_test_interactive_user(username="mask_task_reader", roles=[reader_role.id])
@@ -188,8 +189,6 @@ class TaskMaskingGQLTestCase(openIMISGraphQLTestCase):
         return relay_id("TaskGQLType", task.id)
 
     def test_an_ordering_through_a_relation_to_a_json_field_is_left_out_without_the_masked_data_right(self):
-        from tasks_management.models import TaskDecision
-
         tasks = []
         for _ in range(2):
             task = Task(
@@ -209,3 +208,86 @@ class TaskMaskingGQLTestCase(openIMISGraphQLTestCase):
                                  [self._global_id(task) for task in by_id])
                 self.assertEqual([node["id"] for node in self._nodes(self.unmasked_token, "task", "id", arguments)],
                                  [self._global_id(task) for task in reversed(by_id)])
+
+
+class OrderedConnectionsMaskingTest(openIMISGraphQLTestCase):
+    """Every ordered connection of the module leaves out, for a reader without the masked-data right, an ordering
+    reaching the tasks' data through a relation: the reader gets the same order both ways."""
+
+    masks = None
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        admin = create_test_interactive_user(username="mask_ord_admin")
+        perms = ["gql_task_search_perms", "gql_task_group_search_perms", "gql_task_flow_search_perms"]
+        reader_role = create_test_role(perm_names=perms, name="MaskOrderReaderRole")
+        unmasked_role = create_test_role(
+            perm_names=perms + ["gql_query_enable_viewing_masked_data_perms"], name="MaskOrderUnmaskedRole")
+        cls.reader = create_test_interactive_user(username="mask_ord_reader", roles=[reader_role.id])
+        cls.unmasked = create_test_interactive_user(username="mask_ord_unmasked", roles=[unmasked_role.id])
+        cls.tokens = {"reader": BaseTestContext(user=cls.reader).get_jwt(),
+                      "unmasked": BaseTestContext(user=cls.unmasked).get_jwt()}
+        cls.names = {}
+        for name in ("Zelda", "Abel"):
+            group = TaskGroup(code=f"mask_ord_{name}", completion_policy="ANY")
+            group.save(username=admin.username)
+            for user in (cls.reader, cls.unmasked):
+                TaskExecutor(task_group=group, user=user).save(username=admin.username)
+            flow = TaskFlow(code=f"mask_ord_{name}", name=f"mask_ord_{name}")
+            flow.save(username=admin.username)
+            task = Task(
+                source="mask_ord_source", status=Task.Status.ACCEPTED, business_event="mask_task_event",
+                executor_action_event=TasksManagementConfig.default_executor_event, business_status={},
+                task_group=group, flow=flow, data={"incoming_data": {"first_name": name}}, json_ext={})
+            task.save(username=admin.username)
+            decision = TaskDecision(task=task, user=cls.reader, decision=TaskDecision.Decision.APPROVED)
+            decision.save(username=admin.username)
+            for row in (group, flow, decision):
+                cls.names[str(row.id)] = name
+        cls.masks = [TaskTestMask(), HistoricalTaskTestMask()]
+        MaskingClassRegistryPoint.register_masking_class(cls.masks)
+
+    @classmethod
+    def tearDownClass(cls):
+        MaskingClassRegistryPoint.REGISTERED_MASKING_CLASS[:] = [
+            entry for entry in MaskingClassRegistryPoint.REGISTERED_MASKING_CLASS
+            if entry["class_reference"] not in (cls.masks or [])]
+        super().tearDownClass()
+
+    def _names(self, who, field, arguments, order, name_of):
+        response = self.query(f'{{ {field}({arguments}, orderBy: ["{order}"]) {{ edges {{ node {{ id }} }} }} }}',
+                              headers={"HTTP_AUTHORIZATION": f"Bearer {self.tokens[who]}"})
+        content = json.loads(response.content)
+        self.assertNotIn("errors", content)
+        ids = [relay.Node.from_global_id(edge["node"]["id"])[1] for edge in content["data"][field]["edges"]]
+        self.assertTrue(ids)
+        return [name_of(row_id) for row_id in ids]
+
+    CONNECTIONS = (
+        ("taskGroup", 'code_Istartswith: "mask_ord_"', "task__data__incoming_data__first_name"),
+        ("taskFlow", 'code_Istartswith: "mask_ord_"', "tasks__data__incoming_data__first_name"),
+        ("taskDecision", 'task_Source: "mask_ord_source"', "task__data__incoming_data__first_name"),
+        ("taskExecutor", 'taskGroup_Code_Istartswith: "mask_ord_"', "task_group__task__data__incoming_data__first_name"),
+    )
+
+    def _name_of(self, field):
+        if field != "taskExecutor":
+            return self.names.__getitem__
+        return lambda row_id: TaskExecutor.objects.get(id=row_id).task_group.code[len("mask_ord_"):]
+
+    def test_an_ordering_through_the_task_data_is_left_out_without_the_masked_data_right(self):
+        for field, arguments, order in self.CONNECTIONS:
+            with self.subTest(field=field):
+                name_of = self._name_of(field)
+                ascending = self._names("reader", field, arguments, order, name_of)
+                self.assertEqual(ascending, self._names("reader", field, arguments, f"-{order}", name_of))
+
+    def test_an_ordering_through_the_task_data_applies_with_the_masked_data_right(self):
+        for field, arguments, order in self.CONNECTIONS:
+            with self.subTest(field=field):
+                name_of = self._name_of(field)
+                ascending = self._names("unmasked", field, arguments, order, name_of)
+                self.assertEqual(ascending, sorted(ascending))
+                self.assertEqual(self._names("unmasked", field, arguments, f"-{order}", name_of),
+                                 sorted(ascending, reverse=True))
